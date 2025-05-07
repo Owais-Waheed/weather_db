@@ -1,5 +1,6 @@
 """
 MongoDB connection and data operations for the Weather API.
+Supports both weather station data and interpolated weather data.
 """
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union
@@ -24,21 +25,31 @@ class MongoDBManager:
             cls._instance._client = None
             cls._instance._db = None
             cls._instance._weather_collection = None
+            cls._instance._interpolation_collection = None  # New collection for interpolated data
             cls._instance._initialize_connection()
         return cls._instance
     
     def _initialize_connection(self) -> None:
-        """Initialize the MongoDB connection."""
+        """Initialize the MongoDB connection and collections."""
         try:
             self._client = MongoClient(settings.MONGODB_URI)
             self._db = self._client[settings.MONGODB_DB_NAME]
+            
+            # Initialize weather station collection
             self._weather_collection = self._db[settings.WEATHER_COLLECTION]
             
-            # Create geo index for location-based queries
+            # Initialize interpolation collection
+            self._interpolation_collection = self._db[settings.INTERPOLATION_COLLECTION]
+            
+            # Create geo index for location-based queries in weather collection
             self._weather_collection.create_index([("location", pymongo.GEOSPHERE)])
             
-            # Create index for timestamp-based queries
+            # Create index for timestamp-based queries in weather collection
             self._weather_collection.create_index([("entries.timestamp", pymongo.ASCENDING)])
+            
+            # Create indexes for interpolation collection
+            self._interpolation_collection.create_index([("location", pymongo.GEOSPHERE)])
+            self._interpolation_collection.create_index([("timestamp", pymongo.ASCENDING)])
             
             print("MongoDB connection initialized successfully")
         except Exception as e:
@@ -57,8 +68,17 @@ class MongoDBManager:
     
     @property
     def weather_collection(self) -> Collection:
-        """Get weather collection."""
+        """Get weather station collection."""
         return self._weather_collection
+    
+    @property
+    def interpolation_collection(self) -> Collection:
+        """Get interpolation data collection."""
+        return self._interpolation_collection
+    
+    #
+    # Weather Station Data Methods
+    #
     
     def insert_weather_station(self, station_data: Dict[str, Any]) -> str:
         """
@@ -256,6 +276,125 @@ class MongoDBManager:
             List[Dict]: List of weather stations
         """
         return list(self._weather_collection.find({}).limit(limit))
+    
+    #
+    # Interpolation Data Methods
+    #
+    
+    def clear_interpolation_collection(self) -> int:
+        """
+        Clear all interpolated data.
+        
+        Returns:
+            int: Number of documents deleted
+        """
+        result = self._interpolation_collection.delete_many({})
+        return result.deleted_count
+    
+    def insert_interpolation_data(self, data: Union[Dict[str, Any], List[Dict[str, Any]]]) -> Union[str, List[str]]:
+        """
+        Insert interpolated weather data into MongoDB.
+        
+        Args:
+            data: Single document or list of documents with interpolation data
+            
+        Returns:
+            Union[str, List[str]]: ID(s) of the inserted document(s)
+        """
+        if isinstance(data, list):
+            result = self._interpolation_collection.insert_many(data)
+            return [str(id) for id in result.inserted_ids]
+        else:
+            result = self._interpolation_collection.insert_one(data)
+            return str(result.inserted_id)
+    
+    def find_interpolation_by_timestamp(self, timestamp: datetime, 
+                                        max_results: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Get interpolation data for a specific timestamp.
+        
+        Args:
+            timestamp: Datetime object to search for
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List[Dict]: List of interpolation data points matching the timestamp
+        """
+        return list(self._interpolation_collection.find(
+            {"timestamp": timestamp}
+        ).limit(max_results))
+    
+    def find_interpolation_by_time_range(self, start_time: datetime, end_time: datetime,
+                                         max_results: int = 10000) -> List[Dict[str, Any]]:
+        """
+        Get interpolation data within a time range.
+        
+        Args:
+            start_time: Start datetime for the range
+            end_time: End datetime for the range
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List[Dict]: List of interpolation data points within the time range
+        """
+        return list(self._interpolation_collection.find({
+            "timestamp": {
+                "$gte": start_time,
+                "$lte": end_time
+            }
+        }).limit(max_results))
+    
+    def find_interpolation_near_point(self, longitude: float, latitude: float, 
+                                      timestamp: Optional[datetime] = None,
+                                      max_distance: int = 10000,
+                                      max_results: int = 100) -> List[Dict[str, Any]]:
+        """
+        Find interpolated data points near a specified location.
+        
+        Args:
+            longitude: Longitude coordinate
+            latitude: Latitude coordinate
+            timestamp: Optional specific timestamp to filter by
+            max_distance: Maximum distance in meters (default: 10km)
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List[Dict]: List of interpolation data points near the specified location
+        """
+        query = {
+            "location": {
+                "$near": {
+                    "$geometry": {
+                        "type": "Point",
+                        "coordinates": [longitude, latitude]
+                    },
+                    "$maxDistance": max_distance
+                }
+            }
+        }
+        
+        if timestamp:
+            query["timestamp"] = timestamp
+            
+        return list(self._interpolation_collection.find(query).limit(max_results))
+    
+    def count_interpolation_points(self) -> int:
+        """
+        Count the total number of interpolation data points in the database.
+        
+        Returns:
+            int: Number of interpolation data points
+        """
+        return self._interpolation_collection.count_documents({})
+    
+    def get_available_interpolation_timestamps(self) -> List[datetime]:
+        """
+        Get all available timestamps for interpolation data.
+        
+        Returns:
+            List[datetime]: List of unique timestamps in the interpolation collection
+        """
+        return self._interpolation_collection.distinct("timestamp")
 
 
 # Export the singleton instance

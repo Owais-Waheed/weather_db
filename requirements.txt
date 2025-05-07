@@ -7,3 +7,4 @@ pytz
 pydantic
 pydantic-settings
 python-dateutil
+motor
